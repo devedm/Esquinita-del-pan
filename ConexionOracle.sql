@@ -66,3 +66,8 @@ GRANT CREATE JOB TO PROFESOR;
 SELECT job_name, enabled, state, next_run_date
 FROM DBA_SCHEDULER_JOBS
 WHERE job_name = 'REFRESCA_VM_EML';
+
+-- Permisos para Jobs y vistas materializadas
+
+GRANT CREATE MATERIALIZED VIEW TO USR_ADMIN_ESQUINITA;
+GRANT CREATE JOB               TO USR_ADMIN_ESQUINITA;
