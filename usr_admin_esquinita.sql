@@ -434,6 +434,54 @@ END;
 --   WHERE desencriptar_texto(CORREO) = 'juan@correo.com'
 --------------------------------------------------------------------------------
 );
+
+--------------------------------------------------------------------------------
+-- PROBAR ENCRIPTACION Y DESENCRIPTACION
+-- Se corre cada bloque y compara los resultados para ver el antes/despues.
+--------------------------------------------------------------------------------
+
+-- 1) Encriptar un texto suelto: el resultado es ilegible (cifrado en RAW/hex)
+SELECT encriptar_texto('Roman Elizondo') AS TEXTO_CIFRADO
+  FROM DUAL;
+
+-- 2) Desencriptarlo: se recupera el texto original
+SELECT desencriptar_texto(encriptar_texto('Roman Elizondo')) AS TEXTO_RECUPERADO
+  FROM DUAL;
+
+
+-- 3) Insertar un cliente de prueba (el trigger encripta automaticamente
+--    NOMBRE, TELEFONO y CORREO antes de guardarlos)
+INSERT INTO DIM_CLIENTE (NOMBRE, TELEFONO, CORREO, FECHA_REGISTRO)
+VALUES ('Demo Encriptacion', '70001111', 'demo@correo.com', SYSDATE);
+COMMIT;
+
+
+-- 4) Ver como quedo GUARDADO REALMENTE en la tabla
+--    (esto es lo que veria cualquiera que consulte la tabla directamente,
+--    sin pasar por la funcion de desencriptar)
+SELECT ID_CLIENTE, NOMBRE, TELEFONO, CORREO
+  FROM DIM_CLIENTE
+ WHERE NOMBRE = encriptar_texto('Demo Encriptacion');
+-- -> NOMBRE, TELEFONO y CORREO aparecen como texto cifrado, ilegible
+
+
+-- 5) Ver el MISMO registro pero desencriptado
+--    (esto es lo que veria la aplicacion o un reporte autorizado)
+SELECT ID_CLIENTE,
+       desencriptar_texto(NOMBRE)   AS NOMBRE,
+       desencriptar_texto(TELEFONO) AS TELEFONO,
+       desencriptar_texto(CORREO)   AS CORREO
+  FROM DIM_CLIENTE
+ WHERE NOMBRE = encriptar_texto('Demo Encriptacion');
+-- -> Ahora se ve "Demo Encriptacion", "70001111", "demo@correo.com" en claro
+
+
+-- 6) Limpiar el registro de prueba
+DELETE FROM DIM_CLIENTE WHERE NOMBRE = encriptar_texto('Demo Encriptacion');
+COMMIT;
+--------------------------------------------------------------------------------
+
+
  
 --------------------------------------------------------------------------------
 -- AUDITORIA ESQUINITA 
@@ -883,5 +931,53 @@ SELECT trigger_name, table_name, status
 -- SELECT OPERACION, FECHA_CAMBIO, USUARIO,
 --        desencriptar_texto(NOMBRE_ANTERIOR) AS NOMBRE_BORRADO
 --   FROM LOG_DIM_CLIENTE_ESQUINITA
+
+-- Prueba de Auditoria Seguridad
+-- Insertar una venta de prueba (ajustá ID_CLIENTE, ID_EMPLEADO, ID_TIEMPO a valores que existan)
+INSERT INTO FACT_VENTA (ID_VENTA, ID_CLIENTE, ID_EMPLEADO, ID_TIEMPO, TOTAL_VENTA, METODO_PAGO, ESTADO_VENTA)
+VALUES (9999, (SELECT MIN(ID_CLIENTE) FROM DIM_CLIENTE), (SELECT MIN(ID_EMPLEADO) FROM DIM_EMPLEADO),
+        (SELECT MIN(ID_TIEMPO) FROM DIM_TIEMPO), 1000, 'EFECTIVO', 'PENDIENTE');
+
+-- Modificarla (dispara los 3 triggers: total, estado, metodo)
+UPDATE FACT_VENTA SET TOTAL_VENTA = 1500, ESTADO_VENTA = 'COMPLETADA', METODO_PAGO = 'TARJETA'
+WHERE ID_VENTA = 9999;
+
+-- Borrarla
+DELETE FROM FACT_VENTA WHERE ID_VENTA = 9999;
+COMMIT;
+
+-- Verificar: cada bitácora debe mostrar INSERT, UPDATE y DELETE para ID_VENTA = 9999
+SELECT * FROM LOG_FACT_VENTA_ESQUINITA   WHERE ID_VENTA = 9999 ORDER BY FECHA_CAMBIO;
+SELECT * FROM LOG_ESTADO_VENTA_ESQUINITA WHERE ID_VENTA = 9999 ORDER BY FECHA_CAMBIO;
+SELECT * FROM LOG_METODO_PAGO_ESQUINITA  WHERE ID_VENTA = 9999 ORDER BY FECHA_CAMBIO;
+
+-- --------------------------------------------------------------------------------
+-- Prueba Sobre tabla encriptada
+-- --------------------------------------------------------------------------------
+INSERT INTO DIM_CLIENTE (NOMBRE, TELEFONO, CORREO, FECHA_REGISTRO)
+VALUES ('Auditoria Test', '87654321', 'auditoria@test.com', SYSDATE);
+
+UPDATE DIM_CLIENTE SET TELEFONO = '99998888'
+WHERE NOMBRE = encriptar_texto('Auditoria Test');
+
+DELETE FROM DIM_CLIENTE WHERE NOMBRE = encriptar_texto('Auditoria Test');
+COMMIT;
+
+-- Verificar, mostrando los valores en texto plano (no el cifrado)
+SELECT OPERACION, FECHA_CAMBIO, USUARIO,
+       desencriptar_texto(NOMBRE_ANTERIOR)   AS NOMBRE_ANTERIOR,
+       desencriptar_texto(NOMBRE_NUEVO)      AS NOMBRE_NUEVO,
+       desencriptar_texto(TELEFONO_ANTERIOR) AS TEL_ANTERIOR,
+       desencriptar_texto(TELEFONO_NUEVO)    AS TEL_NUEVO
+  FROM LOG_DIM_CLIENTE_ESQUINITA
+ ORDER BY FECHA_CAMBIO DESC
+ FETCH FIRST 3 ROWS ONLY;
+ -- ----------------------------------------------------------------------------
+ -- Vista general de todo lo auditado recientemente
+ SELECT 'FACT_VENTA' AS TABLA, OPERACION, USUARIO, FECHA_CAMBIO FROM LOG_FACT_VENTA_ESQUINITA
+UNION ALL
+SELECT 'DIM_CLIENTE', OPERACION, USUARIO, FECHA_CAMBIO FROM LOG_DIM_CLIENTE_ESQUINITA
+ORDER BY FECHA_CAMBIO DESC;
+
 --  ORDER BY FECHA_CAMBIO DESC FETCH FIRST 1 ROWS ONLY;
 --------------------------------------------------------------------------------
