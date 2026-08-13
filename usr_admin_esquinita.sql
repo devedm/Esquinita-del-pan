@@ -171,4 +171,56 @@ END;
 BEGIN
   refresca_vistas_esquinita;
 END;
+
+
+-- Job de respaldo automatico a media noche
+
+BEGIN
+  DBMS_SCHEDULER.CREATE_JOB (
+    job_name        => 'job_respaldo_esquinita',
+    job_type        => 'PLSQL_BLOCK',
+    job_action      => 'BEGIN
+                          -- Limpiar respaldos anteriores
+                          DELETE FROM FACT_VENTA_BAK;
+                          DELETE FROM FACT_DETALLE_VENTA_BAK;
+                          DELETE FROM FACT_PRODUCCION_BAK;
+                          DELETE FROM FACT_INVENTARIO_BAK;
+ 
+                          -- Reinsertar datos actuales
+                          INSERT INTO FACT_VENTA_BAK
+                            SELECT * FROM FACT_VENTA;
+                          INSERT INTO FACT_DETALLE_VENTA_BAK
+                            SELECT * FROM FACT_DETALLE_VENTA;
+                          INSERT INTO FACT_PRODUCCION_BAK
+                            SELECT * FROM FACT_PRODUCCION;
+                          INSERT INTO FACT_INVENTARIO_BAK
+                            SELECT * FROM FACT_INVENTARIO_INGREDIENTE;
+ 
+                          COMMIT;
+                          DBMS_OUTPUT.PUT_LINE(''Respaldo completado: '' || SYSDATE);
+                        END;',
+    start_date      => TRUNC(SYSTIMESTAMP + 1),
+    repeat_interval => 'FREQ=DAILY; BYHOUR=0; BYMINUTE=0; BYSECOND=0',
+    enabled         => TRUE,
+    comments        => 'Respaldo diario automatico de tablas criticas - Esquinita del Pan'
+  );
+END;
+ 
+-- Job de refresco de las vistas materializadas a media noche
+
+BEGIN
+  DBMS_SCHEDULER.CREATE_JOB (
+    job_name        => 'job_refresco_vistas_esquinita',
+    job_type        => 'PLSQL_BLOCK',
+    job_action      => 'BEGIN
+                          DBMS_MVIEW.REFRESH(''mv_ventas_por_producto'');
+                          DBMS_MVIEW.REFRESH(''mv_alerta_inventario'');
+                          DBMS_OUTPUT.PUT_LINE(''Vistas refrescadas: '' || SYSDATE);
+                        END;',
+    start_date      => TRUNC(SYSTIMESTAMP + 1),
+    repeat_interval => 'FREQ=DAILY; BYHOUR=0; BYMINUTE=0; BYSECOND=0',
+    enabled         => TRUE,
+    comments        => 'Refresco diario de vistas materializadas - Esquinita del Pan'
+  );
+END;
  
