@@ -231,5 +231,657 @@ FROM USER_SCHEDULER_JOBS
 WHERE job_name IN (
     'JOB_RESPALDO_ESQUINITA',
     'JOB_REFRESCO_VISTAS_ESQUINITA'
+-- ------------------------------------------------------------------------------
+-- ENCRIPTACION DE DATOS SENSIBLES - PROYECTO ESQUINITA
+-- Tablas afectadas: DIM_CLIENTE, DIM_EMPLEADO, DIM_PROVEEDOR
+--
+-- IMPORTANTE ANTES DE CORRER ESTE SCRIPT:
+--  GRANT EXECUTE ON DBMS_CRYPTO TO USR_ADMIN_ESQUINITA;
+-- Clave 'esquinita@2026'  MISMA clave en las 3 funciones
+
+--  SALARIO se encripta (se guarda como texto).
+--  Los triggers aplican en INSERT y UPDATE.
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+-- 1. FUNCIONES DE ENCRIPTACION / DESENCRIPTACION 
+--------------------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION encriptar_texto (p_text VARCHAR2) RETURN RAW IS
+    l_key RAW(32) := UTL_I18N.STRING_TO_RAW(
+                        SUBSTR(RPAD('esquinita@2026', 32, 'X'), 1, 32),
+                        'AL32UTF8'
+                     );
+BEGIN
+    IF p_text IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    RETURN DBMS_CRYPTO.ENCRYPT(
+        UTL_I18N.STRING_TO_RAW(p_text, 'AL32UTF8'),
+        DBMS_CRYPTO.AES_CBC_PKCS5,
+        l_key
+    );
+END encriptar_texto;
+/
+
+CREATE OR REPLACE FUNCTION desencriptar_texto (p_encrypted RAW) RETURN VARCHAR2 IS
+    l_key RAW(32) := UTL_I18N.STRING_TO_RAW(
+                        SUBSTR(RPAD('esquinita@2026', 32, 'X'), 1, 32),
+                        'AL32UTF8'
+                     );
+    l_raw RAW(32767);
+BEGIN
+    IF p_encrypted IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    l_raw := DBMS_CRYPTO.DECRYPT(
+        p_encrypted,
+        DBMS_CRYPTO.AES_CBC_PKCS5,
+        l_key
+    );
+    RETURN UTL_I18N.RAW_TO_CHAR(l_raw, 'AL32UTF8');
+END desencriptar_texto;
+/
+
+--------------------------------------------------------------------------------
+-- 2. MIGRACION DE COLUMNAS EXISTENTES
+--    (agrandar columnas + encriptar el dato que ya este cargado)
+--------------------------------------------------------------------------------
+
+------------------------------
+-- DIM_CLIENTE
+------------------------------
+ALTER TABLE DIM_CLIENTE MODIFY (NOMBRE   VARCHAR2(250 BYTE));
+ALTER TABLE DIM_CLIENTE MODIFY (TELEFONO VARCHAR2(80  BYTE));
+ALTER TABLE DIM_CLIENTE MODIFY (CORREO   VARCHAR2(280 BYTE));
+
+UPDATE DIM_CLIENTE SET NOMBRE   = encriptar_texto(NOMBRE)   WHERE NOMBRE   IS NOT NULL;
+UPDATE DIM_CLIENTE SET TELEFONO = encriptar_texto(TELEFONO) WHERE TELEFONO IS NOT NULL;
+UPDATE DIM_CLIENTE SET CORREO   = encriptar_texto(CORREO)   WHERE CORREO   IS NOT NULL;
+COMMIT;
+
+------------------------------
+-- DIM_EMPLEADO
+------------------------------
+ALTER TABLE DIM_EMPLEADO MODIFY (NOMBRE   VARCHAR2(150 BYTE));
+ALTER TABLE DIM_EMPLEADO MODIFY (APELLIDO VARCHAR2(150 BYTE));
+
+UPDATE DIM_EMPLEADO SET NOMBRE   = encriptar_texto(NOMBRE)   WHERE NOMBRE   IS NOT NULL;
+UPDATE DIM_EMPLEADO SET APELLIDO = encriptar_texto(APELLIDO) WHERE APELLIDO IS NOT NULL;
+COMMIT;
+
+-- SALARIO cambia de NUMBER a VARCHAR2, asi que necesita columna temporal
+ALTER TABLE DIM_EMPLEADO ADD (SALARIO_TMP VARCHAR2(60 BYTE));
+
+UPDATE DIM_EMPLEADO
+   SET SALARIO_TMP = encriptar_texto(TO_CHAR(SALARIO))
+ WHERE SALARIO IS NOT NULL;
+COMMIT;
+
+ALTER TABLE DIM_EMPLEADO DROP COLUMN SALARIO;
+ALTER TABLE DIM_EMPLEADO RENAME COLUMN SALARIO_TMP TO SALARIO;
+
+------------------------------
+-- DIM_PROVEEDOR
+------------------------------
+ALTER TABLE DIM_PROVEEDOR MODIFY (NOMBRE_EMPRESA VARCHAR2(250 BYTE));
+ALTER TABLE DIM_PROVEEDOR MODIFY (CONTACTO       VARCHAR2(250 BYTE));
+ALTER TABLE DIM_PROVEEDOR MODIFY (TELEFONO       VARCHAR2(80  BYTE));
+ALTER TABLE DIM_PROVEEDOR MODIFY (CORREO         VARCHAR2(280 BYTE));
+ALTER TABLE DIM_PROVEEDOR MODIFY (DIRECCION      VARCHAR2(450 BYTE));
+
+UPDATE DIM_PROVEEDOR SET NOMBRE_EMPRESA = encriptar_texto(NOMBRE_EMPRESA) WHERE NOMBRE_EMPRESA IS NOT NULL;
+UPDATE DIM_PROVEEDOR SET CONTACTO       = encriptar_texto(CONTACTO)       WHERE CONTACTO       IS NOT NULL;
+UPDATE DIM_PROVEEDOR SET TELEFONO       = encriptar_texto(TELEFONO)       WHERE TELEFONO       IS NOT NULL;
+UPDATE DIM_PROVEEDOR SET CORREO         = encriptar_texto(CORREO)         WHERE CORREO         IS NOT NULL;
+UPDATE DIM_PROVEEDOR SET DIRECCION      = encriptar_texto(DIRECCION)      WHERE DIRECCION      IS NOT NULL;
+COMMIT;
+
+
+--------------------------------------------------------------------------------
+-- 3. TRIGGERS: encriptan automaticamente en cada INSERT/UPDATE
+--
+-- IMPORTANTE: usan UPDATING('COLUMNA') para encriptar SOLO cuando esa
+-- columna viene explicitamente en el INSERT/UPDATE. 
+--------------------------------------------------------------------------------
+
+CREATE OR REPLACE TRIGGER trg_dim_cliente_enc
+BEFORE INSERT OR UPDATE ON DIM_CLIENTE
+FOR EACH ROW
+BEGIN
+    IF INSERTING OR UPDATING('NOMBRE') THEN
+        :NEW.NOMBRE := encriptar_texto(:NEW.NOMBRE);
+    END IF;
+
+    IF INSERTING OR UPDATING('TELEFONO') THEN
+        :NEW.TELEFONO := encriptar_texto(:NEW.TELEFONO);
+    END IF;
+
+    IF INSERTING OR UPDATING('CORREO') THEN
+        :NEW.CORREO := encriptar_texto(:NEW.CORREO);
+    END IF;
+END;
+/
+
+CREATE OR REPLACE TRIGGER trg_dim_empleado_enc
+BEFORE INSERT OR UPDATE ON DIM_EMPLEADO
+FOR EACH ROW
+BEGIN
+    IF INSERTING OR UPDATING('NOMBRE') THEN
+        :NEW.NOMBRE := encriptar_texto(:NEW.NOMBRE);
+    END IF;
+
+    IF INSERTING OR UPDATING('APELLIDO') THEN
+        :NEW.APELLIDO := encriptar_texto(:NEW.APELLIDO);
+    END IF;
+
+    IF INSERTING OR UPDATING('SALARIO') THEN
+        :NEW.SALARIO := encriptar_texto(:NEW.SALARIO);
+    END IF;
+END;
+/
+
+CREATE OR REPLACE TRIGGER trg_dim_proveedor_enc
+BEFORE INSERT OR UPDATE ON DIM_PROVEEDOR
+FOR EACH ROW
+BEGIN
+    IF INSERTING OR UPDATING('NOMBRE_EMPRESA') THEN
+        :NEW.NOMBRE_EMPRESA := encriptar_texto(:NEW.NOMBRE_EMPRESA);
+    END IF;
+
+    IF INSERTING OR UPDATING('CONTACTO') THEN
+        :NEW.CONTACTO := encriptar_texto(:NEW.CONTACTO);
+    END IF;
+
+    IF INSERTING OR UPDATING('TELEFONO') THEN
+        :NEW.TELEFONO := encriptar_texto(:NEW.TELEFONO);
+    END IF;
+
+    IF INSERTING OR UPDATING('CORREO') THEN
+        :NEW.CORREO := encriptar_texto(:NEW.CORREO);
+    END IF;
+
+    IF INSERTING OR UPDATING('DIRECCION') THEN
+        :NEW.DIRECCION := encriptar_texto(:NEW.DIRECCION);
+    END IF;
+END;
+/
+
+
+--------------------------------------------------------------------------------
+-- 4. COMO CONSULTAR LOS DATOS DESPUES DE ESTO
+--------------------------------------------------------------------------------
+
+-- Para leer en texto plano:
+--   SELECT ID_CLIENTE, desencriptar_texto(NOMBRE) AS NOMBRE,
+--          desencriptar_texto(TELEFONO) AS TELEFONO,
+--          desencriptar_texto(CORREO) AS CORREO
+--     FROM DIM_CLIENTE;
+
+--   SELECT ID_EMPLEADO, desencriptar_texto(NOMBRE) AS NOMBRE,
+--          desencriptar_texto(APELLIDO) AS APELLIDO,
+--          TO_NUMBER(desencriptar_texto(SALARIO)) AS SALARIO
+--     FROM DIM_EMPLEADO;
+
+--  CON LOS WHERE / BUSQUEDAS:
+-- Una vez encriptada la columna, ya NO se puede hacer
+--   WHERE CORREO = 'juan@correo.com'
+-- porque lo que esta guardado es el texto cifrado, no el original.
+-- se tiene que hacer:
+--   WHERE desencriptar_texto(CORREO) = 'juan@correo.com'
+--------------------------------------------------------------------------------
 );
  
+--------------------------------------------------------------------------------
+-- AUDITORIA ESQUINITA 
+
+--  En las bitacoras de DIM_CLIENTE/DIM_EMPLEADO/DIM_PROVEEDOR se guarda
+--  el valor CIFRADO (tal cual esta en la columna), NO el texto plano.
+--  Si guardaramos el texto plano en la bitacora, estariamos creando una
+--  segunda copia SIN PROTEGER del dato sensible.
+
+-- ORDEN DE EJECUCION: correr de arriba a abajo, una sola vez. Si se
+-- vuelve a correr, los CREATE TABLE de la seccion 4 van a fallar porque
+-- ya existen 
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+-- 1. CORREGIR TRIGGER DUPLICADO (ESTADO_VENTA se registraba 2 veces)
+--------------------------------------------------------------------------------
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TRIGGER UPDATE_ESTADO_VENTA_ESQUINITA';
+EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+-- Queda activo solo UPDATE_LOG_ESTADO_VENTA_ESQUINITA (hace lo mismo, sin duplicar)
+
+
+--------------------------------------------------------------------------------
+-- 2. AGREGAR COLUMNA OPERACION A LAS BITACORAS EXISTENTES
+--------------------------------------------------------------------------------
+ALTER TABLE LOG_FACT_VENTA_ESQUINITA            ADD (OPERACION VARCHAR2(10));
+ALTER TABLE LOG_ESTADO_VENTA_ESQUINITA          ADD (OPERACION VARCHAR2(10));
+ALTER TABLE LOG_METODO_PAGO_ESQUINITA           ADD (OPERACION VARCHAR2(10));
+ALTER TABLE LOG_DETALLE_VENTA_ESQUINITA         ADD (OPERACION VARCHAR2(10));
+ALTER TABLE LOG_FACT_COMPRA_ESQUINITA           ADD (OPERACION VARCHAR2(10));
+ALTER TABLE LOG_ESTADO_COMPRA_ESQUINITA         ADD (OPERACION VARCHAR2(10));
+ALTER TABLE LOG_DETALLE_COMPRA_ESQUINITA        ADD (OPERACION VARCHAR2(10));
+ALTER TABLE LOG_FACT_PRODUCCION_ESQUINITA       ADD (OPERACION VARCHAR2(10));
+ALTER TABLE LOG_INVENTARIO_INGREDIENTE_ESQUINITA ADD (OPERACION VARCHAR2(10));
+
+
+--------------------------------------------------------------------------------
+-- 3. RECREAR TRIGGERS: ahora tambien disparan en INSERT y DELETE
+--    (antes solo disparaban en UPDATE de la columna indicada)
+--------------------------------------------------------------------------------
+
+-- FACT_VENTA / TOTAL_VENTA
+CREATE OR REPLACE TRIGGER UPDATE_LOG_FACT_VENTA_ESQUINITA
+AFTER INSERT OR UPDATE OF TOTAL_VENTA OR DELETE ON FACT_VENTA
+FOR EACH ROW
+DECLARE
+    v_operacion VARCHAR2(10);
+BEGIN
+    IF INSERTING THEN v_operacion := 'INSERT';
+    ELSIF UPDATING THEN v_operacion := 'UPDATE';
+    ELSIF DELETING THEN v_operacion := 'DELETE';
+    END IF;
+
+    INSERT INTO LOG_FACT_VENTA_ESQUINITA
+        (ID_VENTA, TOTAL_ANTERIOR, TOTAL_NUEVO, FECHA_CAMBIO, USUARIO, OPERACION)
+    VALUES (
+        NVL(:NEW.ID_VENTA, :OLD.ID_VENTA),
+        :OLD.TOTAL_VENTA,
+        :NEW.TOTAL_VENTA,
+        SYSDATE,
+        USER,
+        v_operacion
+    );
+END;
+/
+
+-- FACT_VENTA / ESTADO_VENTA
+CREATE OR REPLACE TRIGGER UPDATE_LOG_ESTADO_VENTA_ESQUINITA
+AFTER INSERT OR UPDATE OF ESTADO_VENTA OR DELETE ON FACT_VENTA
+FOR EACH ROW
+DECLARE
+    v_operacion VARCHAR2(10);
+BEGIN
+    IF INSERTING THEN v_operacion := 'INSERT';
+    ELSIF UPDATING THEN v_operacion := 'UPDATE';
+    ELSIF DELETING THEN v_operacion := 'DELETE';
+    END IF;
+
+    INSERT INTO LOG_ESTADO_VENTA_ESQUINITA
+        (ID_VENTA, ESTADO_ANTERIOR, ESTADO_NUEVO, FECHA_CAMBIO, USUARIO, OPERACION)
+    VALUES (
+        NVL(:NEW.ID_VENTA, :OLD.ID_VENTA),
+        :OLD.ESTADO_VENTA,
+        :NEW.ESTADO_VENTA,
+        SYSDATE,
+        USER,
+        v_operacion
+    );
+END;
+/
+
+-- FACT_VENTA / METODO_PAGO
+CREATE OR REPLACE TRIGGER UPDATE_LOG_METODO_PAGO_ESQUINITA
+AFTER INSERT OR UPDATE OF METODO_PAGO OR DELETE ON FACT_VENTA
+FOR EACH ROW
+DECLARE
+    v_operacion VARCHAR2(10);
+BEGIN
+    IF INSERTING THEN v_operacion := 'INSERT';
+    ELSIF UPDATING THEN v_operacion := 'UPDATE';
+    ELSIF DELETING THEN v_operacion := 'DELETE';
+    END IF;
+
+    INSERT INTO LOG_METODO_PAGO_ESQUINITA
+        (ID_VENTA, METODO_ANTERIOR, METODO_NUEVO, FECHA_CAMBIO, USUARIO, OPERACION)
+    VALUES (
+        NVL(:NEW.ID_VENTA, :OLD.ID_VENTA),
+        :OLD.METODO_PAGO,
+        :NEW.METODO_PAGO,
+        SYSDATE,
+        USER,
+        v_operacion
+    );
+END;
+/
+
+-- FACT_DETALLE_VENTA / CANTIDAD, PRECIO_UNITARIO
+CREATE OR REPLACE TRIGGER UPDATE_LOG_DETALLE_VENTA_ESQUINITA
+AFTER INSERT OR UPDATE OF CANTIDAD, PRECIO_UNITARIO OR DELETE ON FACT_DETALLE_VENTA
+FOR EACH ROW
+DECLARE
+    v_operacion VARCHAR2(10);
+BEGIN
+    IF INSERTING THEN v_operacion := 'INSERT';
+    ELSIF UPDATING THEN v_operacion := 'UPDATE';
+    ELSIF DELETING THEN v_operacion := 'DELETE';
+    END IF;
+
+    INSERT INTO LOG_DETALLE_VENTA_ESQUINITA
+        (ID_DETALLE_VENTA, CANTIDAD_ANTERIOR, CANTIDAD_NUEVA, PRECIO_ANTERIOR, PRECIO_NUEVO, FECHA_CAMBIO, USUARIO, OPERACION)
+    VALUES (
+        NVL(:NEW.ID_DETALLE, :OLD.ID_DETALLE),
+        :OLD.CANTIDAD,
+        :NEW.CANTIDAD,
+        :OLD.PRECIO_UNITARIO,
+        :NEW.PRECIO_UNITARIO,
+        SYSDATE,
+        USER,
+        v_operacion
+    );
+END;
+/
+
+-- FACT_COMPRA / TOTAL_COMPRA
+CREATE OR REPLACE TRIGGER UPDATE_LOG_FACT_COMPRA_ESQUINITA
+AFTER INSERT OR UPDATE OF TOTAL_COMPRA OR DELETE ON FACT_COMPRA
+FOR EACH ROW
+DECLARE
+    v_operacion VARCHAR2(10);
+BEGIN
+    IF INSERTING THEN v_operacion := 'INSERT';
+    ELSIF UPDATING THEN v_operacion := 'UPDATE';
+    ELSIF DELETING THEN v_operacion := 'DELETE';
+    END IF;
+
+    INSERT INTO LOG_FACT_COMPRA_ESQUINITA
+        (ID_COMPRA, TOTAL_ANTERIOR, TOTAL_NUEVO, FECHA_CAMBIO, USUARIO, OPERACION)
+    VALUES (
+        NVL(:NEW.ID_COMPRA, :OLD.ID_COMPRA),
+        :OLD.TOTAL_COMPRA,
+        :NEW.TOTAL_COMPRA,
+        SYSDATE,
+        USER,
+        v_operacion
+    );
+END;
+/
+
+-- FACT_COMPRA / ESTADO
+CREATE OR REPLACE TRIGGER UPDATE_LOG_ESTADO_COMPRA_ESQUINITA
+AFTER INSERT OR UPDATE OF ESTADO OR DELETE ON FACT_COMPRA
+FOR EACH ROW
+DECLARE
+    v_operacion VARCHAR2(10);
+BEGIN
+    IF INSERTING THEN v_operacion := 'INSERT';
+    ELSIF UPDATING THEN v_operacion := 'UPDATE';
+    ELSIF DELETING THEN v_operacion := 'DELETE';
+    END IF;
+
+    INSERT INTO LOG_ESTADO_COMPRA_ESQUINITA
+        (ID_COMPRA, ESTADO_ANTERIOR, ESTADO_NUEVO, FECHA_CAMBIO, USUARIO, OPERACION)
+    VALUES (
+        NVL(:NEW.ID_COMPRA, :OLD.ID_COMPRA),
+        :OLD.ESTADO,
+        :NEW.ESTADO,
+        SYSDATE,
+        USER,
+        v_operacion
+    );
+END;
+/
+
+-- FACT_DETALLE_COMPRA / CANTIDAD, COSTO_UNITARIO
+CREATE OR REPLACE TRIGGER UPDATE_LOG_DETALLE_COMPRA_ESQUINITA
+AFTER INSERT OR UPDATE OF CANTIDAD, COSTO_UNITARIO OR DELETE ON FACT_DETALLE_COMPRA
+FOR EACH ROW
+DECLARE
+    v_operacion VARCHAR2(10);
+BEGIN
+    IF INSERTING THEN v_operacion := 'INSERT';
+    ELSIF UPDATING THEN v_operacion := 'UPDATE';
+    ELSIF DELETING THEN v_operacion := 'DELETE';
+    END IF;
+
+    INSERT INTO LOG_DETALLE_COMPRA_ESQUINITA
+        (ID_DETALLE_COMPRA, CANTIDAD_ANTERIOR, CANTIDAD_NUEVA, COSTO_ANTERIOR, COSTO_NUEVO, FECHA_CAMBIO, USUARIO, OPERACION)
+    VALUES (
+        NVL(:NEW.ID_DETALLE_COMPRA, :OLD.ID_DETALLE_COMPRA),
+        :OLD.CANTIDAD,
+        :NEW.CANTIDAD,
+        :OLD.COSTO_UNITARIO,
+        :NEW.COSTO_UNITARIO,
+        SYSDATE,
+        USER,
+        v_operacion
+    );
+END;
+/
+
+-- FACT_PRODUCCION / CANTIDAD_PRODUCIDA
+CREATE OR REPLACE TRIGGER UPDATE_LOG_FACT_PRODUCCION_ESQUINITA
+AFTER INSERT OR UPDATE OF CANTIDAD_PRODUCIDA OR DELETE ON FACT_PRODUCCION
+FOR EACH ROW
+DECLARE
+    v_operacion VARCHAR2(10);
+BEGIN
+    IF INSERTING THEN v_operacion := 'INSERT';
+    ELSIF UPDATING THEN v_operacion := 'UPDATE';
+    ELSIF DELETING THEN v_operacion := 'DELETE';
+    END IF;
+
+    INSERT INTO LOG_FACT_PRODUCCION_ESQUINITA
+        (ID_PRODUCCION, CANTIDAD_ANTERIOR, CANTIDAD_NUEVA, FECHA_CAMBIO, USUARIO, OPERACION)
+    VALUES (
+        NVL(:NEW.ID_PRODUCCION, :OLD.ID_PRODUCCION),
+        :OLD.CANTIDAD_PRODUCIDA,
+        :NEW.CANTIDAD_PRODUCIDA,
+        SYSDATE,
+        USER,
+        v_operacion
+    );
+END;
+/
+
+-- FACT_INVENTARIO_INGREDIENTE / CANTIDAD_DISPONIBLE
+CREATE OR REPLACE TRIGGER UPDATE_LOG_INVENTARIO_ING_ESQUINITA
+AFTER INSERT OR UPDATE OF CANTIDAD_DISPONIBLE OR DELETE ON FACT_INVENTARIO_INGREDIENTE
+FOR EACH ROW
+DECLARE
+    v_operacion VARCHAR2(10);
+BEGIN
+    IF INSERTING THEN v_operacion := 'INSERT';
+    ELSIF UPDATING THEN v_operacion := 'UPDATE';
+    ELSIF DELETING THEN v_operacion := 'DELETE';
+    END IF;
+
+    INSERT INTO LOG_INVENTARIO_INGREDIENTE_ESQUINITA
+        (ID_INGREDIENTE, CANTIDAD_ANTERIOR, CANTIDAD_NUEVA, FECHA_CAMBIO, USUARIO, OPERACION)
+    VALUES (
+        NVL(:NEW.ID_INGREDIENTE, :OLD.ID_INGREDIENTE),
+        :OLD.CANTIDAD_DISPONIBLE,
+        :NEW.CANTIDAD_DISPONIBLE,
+        SYSDATE,
+        USER,
+        v_operacion
+    );
+END;
+/
+
+
+--------------------------------------------------------------------------------
+-- 4. AUDITORIA DE LAS TABLAS ENCRIPTADAS
+--------------------------------------------------------------------------------
+
+------------------------------
+-- DIM_CLIENTE
+------------------------------
+CREATE TABLE LOG_DIM_CLIENTE_ESQUINITA (
+    ID_CLIENTE        NUMBER,
+    NOMBRE_ANTERIOR   VARCHAR2(250 BYTE),
+    NOMBRE_NUEVO      VARCHAR2(250 BYTE),
+    TELEFONO_ANTERIOR VARCHAR2(80  BYTE),
+    TELEFONO_NUEVO    VARCHAR2(80  BYTE),
+    CORREO_ANTERIOR   VARCHAR2(280 BYTE),
+    CORREO_NUEVO      VARCHAR2(280 BYTE),
+    FECHA_CAMBIO      DATE,
+    USUARIO           VARCHAR2(30),
+    OPERACION         VARCHAR2(10)
+);
+
+CREATE OR REPLACE TRIGGER UPDATE_LOG_DIM_CLIENTE_ESQUINITA
+AFTER INSERT OR UPDATE OF NOMBRE, TELEFONO, CORREO OR DELETE ON DIM_CLIENTE
+FOR EACH ROW
+DECLARE
+    v_operacion VARCHAR2(10);
+BEGIN
+    IF INSERTING THEN v_operacion := 'INSERT';
+    ELSIF UPDATING THEN v_operacion := 'UPDATE';
+    ELSIF DELETING THEN v_operacion := 'DELETE';
+    END IF;
+
+    INSERT INTO LOG_DIM_CLIENTE_ESQUINITA
+        (ID_CLIENTE, NOMBRE_ANTERIOR, NOMBRE_NUEVO, TELEFONO_ANTERIOR, TELEFONO_NUEVO,
+         CORREO_ANTERIOR, CORREO_NUEVO, FECHA_CAMBIO, USUARIO, OPERACION)
+    VALUES (
+        NVL(:NEW.ID_CLIENTE, :OLD.ID_CLIENTE),
+        :OLD.NOMBRE, :NEW.NOMBRE,
+        :OLD.TELEFONO, :NEW.TELEFONO,
+        :OLD.CORREO, :NEW.CORREO,
+        SYSDATE,
+        USER,
+        v_operacion
+    );
+END;
+/
+
+------------------------------
+-- DIM_EMPLEADO
+------------------------------
+CREATE TABLE LOG_DIM_EMPLEADO_ESQUINITA (
+    ID_EMPLEADO       NUMBER,
+    NOMBRE_ANTERIOR   VARCHAR2(150 BYTE),
+    NOMBRE_NUEVO      VARCHAR2(150 BYTE),
+    APELLIDO_ANTERIOR VARCHAR2(150 BYTE),
+    APELLIDO_NUEVO    VARCHAR2(150 BYTE),
+    SALARIO_ANTERIOR  VARCHAR2(60  BYTE),
+    SALARIO_NUEVO     VARCHAR2(60  BYTE),
+    FECHA_CAMBIO      DATE,
+    USUARIO           VARCHAR2(30),
+    OPERACION         VARCHAR2(10)
+);
+
+CREATE OR REPLACE TRIGGER UPDATE_LOG_DIM_EMPLEADO_ESQUINITA
+AFTER INSERT OR UPDATE OF NOMBRE, APELLIDO, SALARIO OR DELETE ON DIM_EMPLEADO
+FOR EACH ROW
+DECLARE
+    v_operacion VARCHAR2(10);
+BEGIN
+    IF INSERTING THEN v_operacion := 'INSERT';
+    ELSIF UPDATING THEN v_operacion := 'UPDATE';
+    ELSIF DELETING THEN v_operacion := 'DELETE';
+    END IF;
+
+    INSERT INTO LOG_DIM_EMPLEADO_ESQUINITA
+        (ID_EMPLEADO, NOMBRE_ANTERIOR, NOMBRE_NUEVO, APELLIDO_ANTERIOR, APELLIDO_NUEVO,
+         SALARIO_ANTERIOR, SALARIO_NUEVO, FECHA_CAMBIO, USUARIO, OPERACION)
+    VALUES (
+        NVL(:NEW.ID_EMPLEADO, :OLD.ID_EMPLEADO),
+        :OLD.NOMBRE, :NEW.NOMBRE,
+        :OLD.APELLIDO, :NEW.APELLIDO,
+        :OLD.SALARIO, :NEW.SALARIO,
+        SYSDATE,
+        USER,
+        v_operacion
+    );
+END;
+/
+
+------------------------------
+-- DIM_PROVEEDOR
+------------------------------
+CREATE TABLE LOG_DIM_PROVEEDOR_ESQUINITA (
+    ID_PROVEEDOR            NUMBER,
+    NOMBRE_EMPRESA_ANTERIOR VARCHAR2(250 BYTE),
+    NOMBRE_EMPRESA_NUEVO    VARCHAR2(250 BYTE),
+    CONTACTO_ANTERIOR       VARCHAR2(250 BYTE),
+    CONTACTO_NUEVO          VARCHAR2(250 BYTE),
+    TELEFONO_ANTERIOR       VARCHAR2(80  BYTE),
+    TELEFONO_NUEVO          VARCHAR2(80  BYTE),
+    CORREO_ANTERIOR         VARCHAR2(280 BYTE),
+    CORREO_NUEVO            VARCHAR2(280 BYTE),
+    DIRECCION_ANTERIOR      VARCHAR2(450 BYTE),
+    DIRECCION_NUEVO         VARCHAR2(450 BYTE),
+    FECHA_CAMBIO            DATE,
+    USUARIO                 VARCHAR2(30),
+    OPERACION               VARCHAR2(10)
+);
+
+CREATE OR REPLACE TRIGGER UPDATE_LOG_DIM_PROVEEDOR_ESQUINITA
+AFTER INSERT OR UPDATE OF NOMBRE_EMPRESA, CONTACTO, TELEFONO, CORREO, DIRECCION OR DELETE ON DIM_PROVEEDOR
+FOR EACH ROW
+DECLARE
+    v_operacion VARCHAR2(10);
+BEGIN
+    IF INSERTING THEN v_operacion := 'INSERT';
+    ELSIF UPDATING THEN v_operacion := 'UPDATE';
+    ELSIF DELETING THEN v_operacion := 'DELETE';
+    END IF;
+
+    INSERT INTO LOG_DIM_PROVEEDOR_ESQUINITA
+        (ID_PROVEEDOR, NOMBRE_EMPRESA_ANTERIOR, NOMBRE_EMPRESA_NUEVO,
+         CONTACTO_ANTERIOR, CONTACTO_NUEVO,
+         TELEFONO_ANTERIOR, TELEFONO_NUEVO,
+         CORREO_ANTERIOR, CORREO_NUEVO,
+         DIRECCION_ANTERIOR, DIRECCION_NUEVO,
+         FECHA_CAMBIO, USUARIO, OPERACION)
+    VALUES (
+        NVL(:NEW.ID_PROVEEDOR, :OLD.ID_PROVEEDOR),
+        :OLD.NOMBRE_EMPRESA, :NEW.NOMBRE_EMPRESA,
+        :OLD.CONTACTO, :NEW.CONTACTO,
+        :OLD.TELEFONO, :NEW.TELEFONO,
+        :OLD.CORREO, :NEW.CORREO,
+        :OLD.DIRECCION, :NEW.DIRECCION,
+        SYSDATE,
+        USER,
+        v_operacion
+    );
+END;
+/
+
+
+--------------------------------------------------------------------------------
+-- 5. VERIFICACION
+--------------------------------------------------------------------------------
+
+-- Todos deberian aparecer VALID
+SELECT trigger_name, table_name, status
+  FROM user_triggers
+ WHERE trigger_name LIKE 'UPDATE_LOG%'
+ ORDER BY table_name, trigger_name;
+
+-- Para leer una bitacora de datos encriptados en texto plano 
+-- SELECT ID_CLIENTE, OPERACION, FECHA_CAMBIO, USUARIO,
+--        desencriptar_texto(NOMBRE_ANTERIOR) AS NOMBRE_ANTERIOR,
+--        desencriptar_texto(NOMBRE_NUEVO)    AS NOMBRE_NUEVO
+--   FROM LOG_DIM_CLIENTE_ESQUINITA
+--  ORDER BY FECHA_CAMBIO DESC;
+
+
+--------------------------------------------------------------------------------
+-- 6. PRUEBA RAPIDA (no toca datos reales)
+--------------------------------------------------------------------------------
+-- INSERT INTO DIM_CLIENTE (NOMBRE, TELEFONO, CORREO, FECHA_REGISTRO)
+-- VALUES ('Auditoria Test', '87654321', 'auditoria@test.com', SYSDATE);
+--
+-- SELECT OPERACION, FECHA_CAMBIO, USUARIO,
+--        desencriptar_texto(NOMBRE_NUEVO) AS NOMBRE_NUEVO
+--   FROM LOG_DIM_CLIENTE_ESQUINITA
+--  ORDER BY FECHA_CAMBIO DESC FETCH FIRST 1 ROWS ONLY;
+--
+-- DELETE FROM DIM_CLIENTE WHERE NOMBRE = encriptar_texto('Auditoria Test');
+--
+-- SELECT OPERACION, FECHA_CAMBIO, USUARIO,
+--        desencriptar_texto(NOMBRE_ANTERIOR) AS NOMBRE_BORRADO
+--   FROM LOG_DIM_CLIENTE_ESQUINITA
+--  ORDER BY FECHA_CAMBIO DESC FETCH FIRST 1 ROWS ONLY;
+--------------------------------------------------------------------------------
