@@ -223,4 +223,13 @@ BEGIN
     comments        => 'Refresco diario de vistas materializadas - Esquinita del Pan'
   );
 END;
+
+-- Validar los jobs
+ 
+SELECT job_name, enabled, state, next_run_date
+FROM USER_SCHEDULER_JOBS
+WHERE job_name IN (
+    'JOB_RESPALDO_ESQUINITA',
+    'JOB_REFRESCO_VISTAS_ESQUINITA'
+);
  
