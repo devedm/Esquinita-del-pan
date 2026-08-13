@@ -89,3 +89,86 @@ SELECT synonym_name, table_owner, table_name
 FROM dba_synonyms
 WHERE table_owner = 'USR_ADMIN_ESQUINITA'
 ORDER BY synonym_name;
+
+
+
+-- Respaldo Manual
+ 
+-- Respaldo de ventas
+CREATE TABLE FACT_VENTA_BAK AS
+SELECT * FROM FACT_VENTA;
+ 
+-- Respaldo de detalle de ventas
+CREATE TABLE FACT_DETALLE_VENTA_BAK AS
+SELECT * FROM FACT_DETALLE_VENTA;
+ 
+-- Respaldo de produccion
+CREATE TABLE FACT_PRODUCCION_BAK AS
+SELECT * FROM FACT_PRODUCCION;
+ 
+-- Respaldo de inventario
+CREATE TABLE FACT_INVENTARIO_BAK AS
+SELECT * FROM FACT_INVENTARIO_INGREDIENTE;
+ 
+-- Verificar -- que los respaldos tienen datos
+SELECT 'FACT_VENTA_BAK'             AS tabla, COUNT(*) AS registros FROM FACT_VENTA_BAK             UNION ALL
+SELECT 'FACT_DETALLE_VENTA_BAK'     AS tabla, COUNT(*) AS registros FROM FACT_DETALLE_VENTA_BAK     UNION ALL
+SELECT 'FACT_PRODUCCION_BAK'        AS tabla, COUNT(*) AS registros FROM FACT_PRODUCCION_BAK        UNION ALL
+SELECT 'FACT_INVENTARIO_BAK'        AS tabla, COUNT(*) AS registros FROM FACT_INVENTARIO_BAK;
+
+
+-- Vistas Materializadas
+ 
+-- Vista 1: Ventas agrupadas por producto, mes y año
+CREATE MATERIALIZED VIEW mv_ventas_por_producto
+BUILD IMMEDIATE
+REFRESH COMPLETE ON DEMAND
+AS
+SELECT
+  p.nombre_producto,
+  p.unidad_medida,
+  SUM(dv.cantidad)    AS total_unidades_vendidas,
+  SUM(dv.subtotal)    AS total_ingresos,
+  t.mes,
+  t.anio
+FROM FACT_DETALLE_VENTA dv
+JOIN DIM_PRODUCTO p ON dv.id_producto = p.id_producto
+JOIN FACT_VENTA   v ON dv.id_venta    = v.id_venta
+JOIN DIM_TIEMPO   t ON v.id_tiempo    = t.id_tiempo
+GROUP BY p.nombre_producto, p.unidad_medida, t.mes, t.anio;
+ 
+-- Vista 2: Ingredientes con alerta de stock bajo
+CREATE MATERIALIZED VIEW mv_alerta_inventario
+BUILD IMMEDIATE
+REFRESH COMPLETE ON DEMAND
+AS
+SELECT
+  i.nombre_ingrediente,
+  i.unidad_medida,
+  inv.cantidad_disponible,
+  inv.stock_minimo,
+  inv.alerta_stock,
+  t.fecha
+FROM FACT_INVENTARIO_INGREDIENTE inv
+JOIN DIM_INGREDIENTE i ON inv.id_ingrediente = i.id_ingrediente
+JOIN DIM_TIEMPO      t ON inv.id_tiempo      = t.id_tiempo
+WHERE inv.alerta_stock = 'S';
+ 
+-- Verificar -- las vistas materializadas
+SELECT * FROM mv_ventas_por_producto;
+SELECT * FROM mv_alerta_inventario;
+
+-- Refresco de las vistas manual
+ 
+CREATE OR REPLACE PROCEDURE refresca_vistas_esquinita AS
+BEGIN
+  DBMS_MVIEW.REFRESH('mv_ventas_por_producto');
+  DBMS_MVIEW.REFRESH('mv_alerta_inventario');
+  DBMS_OUTPUT.PUT_LINE('Vistas actualizadas correctamente: ' || SYSDATE);
+END;
+ 
+-- Probar el procedimiento manualmente
+BEGIN
+  refresca_vistas_esquinita;
+END;
+ 
